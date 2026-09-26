@@ -3,7 +3,7 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { createCustomRequestSchema, idParam, quoteSchema, statusFilterQuery } from '../schemas';
+import { createCustomRequestSchema, customRequestStatusFilterQuery, idParam, quoteSchema } from '../schemas';
 import { notify, notifyAdmins } from '../lib/notify';
 import { emitToAdmins, emitToUser } from '../socket/io';
 
@@ -118,11 +118,11 @@ adminCustomRequestRouter.use(requireAuth, requireRole('admin'));
 
 adminCustomRequestRouter.get(
   '/',
-  validate({ query: statusFilterQuery }),
+  validate({ query: customRequestStatusFilterQuery }),
   asyncHandler(async (req, res) => {
     const { status } = req.validated?.query as { status?: string };
     const list = await prisma.customRequest.findMany({
-      where: status ? { status: status as never } : {},
+      where: status && status !== 'all' ? { status: status as never } : {},
       include: includeCR,
       orderBy: { created_at: 'desc' },
       take: 200,

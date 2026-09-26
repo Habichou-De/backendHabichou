@@ -3,9 +3,11 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth, requireRole } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { createOrderSchema, idParam, rateOrderSchema, statusFilterQuery } from '../schemas';
+import { createOrderSchema, idParam, orderStatusFilterQuery, rateOrderSchema } from '../schemas';
 import { deliveryFee } from '../services/order.service';
 import { notify, notifyAdmins } from '../lib/notify';
+import { pushAdmins } from '../lib/push';
+import { emitToAdmins } from '../socket/io';
 import { createPaymentIntent, stripeEnabled } from '../lib/stripe';
 import type { Prisma } from '@prisma/client';
 
@@ -86,6 +88,7 @@ orderRouter.post(
     const body = req.validated?.body as {
       address_id: string;
       payment_method: 'card' | 'cash';
+      // Commande issue d'une "Demande spécifique" (devis admin accepté).
       custom_request_id?: string;
       items?: { product_id: string; quantity: number; notes?: string; options?: unknown }[];
     };
@@ -126,6 +129,21 @@ orderRouter.post(
       const products = await tx.product.findMany({ where: { id: { in: productIds } } });
       const byId = new Map(products.map((p) => [p.id, p]));
 
+      // Catalogue de suppléments par produit (prix calculé côté serveur, prix client ignoré).
+      const supplementRows = await tx.productSupplement.findMany({
+        where: { product_id: { in: productIds } },
+        include: { supplement: true },
+      });
+      const supplementsByProduct = new Map<string, { name: string; price: number }[]>();
+      for (const row of supplementRows) {
+        const list = supplementsByProduct.get(row.product_id) ?? [];
+        list.push({
+          name: row.supplement.name,
+          price: row.extra_price_override ?? row.supplement.default_extra_price,
+        });
+        supplementsByProduct.set(row.product_id, list);
+      }
+
       let restaurantId: string | null = null;
       let subtotal = 0;
       const orderItems: Prisma.OrderItemUncheckedCreateWithoutOrderInput[] = [];
@@ -138,7 +156,12 @@ orderRouter.post(
           throw ApiError.badRequest('Tous les articles doivent venir du meme commerce', 'MULTI_RESTAURANT');
         }
         restaurantId = product.restaurant_id;
-        const unit = product.price + optionDelta(product.options, item.options);
+
+        const catalog: { name: string; price: number }[] = [];
+        collectCatalogEntries(product.options, catalog);
+        catalog.push(...(supplementsByProduct.get(product.id) ?? []));
+
+        const unit = product.price + optionDelta(catalog, item.options);
         subtotal += unit * item.quantity;
         orderItems.push({
           product_id: product.id,
@@ -168,8 +191,33 @@ orderRouter.post(
       });
     });
 
-    await notifyAdmins('Nouvelle commande', `Commande ${order.id.slice(0, 8)} — ${order.total_price.toFixed(2)} MAD`, 'order', {
+    const orderRef = order.id.slice(0, 8);
+    const restaurantName = order.restaurant?.name ?? 'Commerce';
+
+    // Alerte "appel entrant" cote admin (sudo_habichou) : event socket + push.
+    emitToAdmins('order:incoming', {
       order_id: order.id,
+      restaurant: restaurantName,
+      total_price: order.total_price,
+      items_count: order.items.length,
+      payment_method: order.payment_method,
+      url: `/admin/incoming?order_id=${order.id}`,
+      created_at: order.created_at.toISOString(),
+    });
+
+    await notifyAdmins(
+      'Nouvelle commande',
+      `Commande ${orderRef} — ${order.total_price.toFixed(2)} MAD`,
+      'order',
+      { order_id: order.id },
+    );
+
+    void pushAdmins({
+      title: 'Nouvelle commande',
+      body: `${restaurantName} — ${order.total_price.toFixed(2)} MAD · ${order.items.length} article(s)`,
+      channelId: 'incoming_order',
+      sound: 'incoming_order.wav',
+      data: { type: 'order_incoming', order_id: order.id, url: `/admin/incoming?order_id=${order.id}` },
     });
 
     res.status(201).json(order);
@@ -178,11 +226,11 @@ orderRouter.post(
 
 orderRouter.get(
   '/me',
-  validate({ query: statusFilterQuery }),
+  validate({ query: orderStatusFilterQuery }),
   asyncHandler(async (req, res) => {
     const { status } = req.validated?.query as { status?: string };
     const orders = await prisma.order.findMany({
-      where: { user_id: req.user!.id, ...(status ? { status: status as never } : {}) },
+      where: { user_id: req.user!.id, ...(status && status !== 'all' ? { status: status as never } : {}) },
       include: orderInclude,
       orderBy: { created_at: 'desc' },
       take: 100,

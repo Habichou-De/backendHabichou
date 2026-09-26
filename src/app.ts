@@ -7,10 +7,14 @@ import { requestLog } from './middleware/requestLog';
 import authRouter from './routes/auth.routes';
 import { addressRouter, publicRouter } from './routes/public.routes';
 import { notificationRouter, uploadRouter } from './routes/common.routes';
+// Demandes spécifiques côté client (flux "Demande spécifique" de l'app habichou).
 import { adminCustomRequestRouter, customRequestRouter } from './routes/customRequest.routes';
 import { orderRouter } from './routes/order.routes';
+import { deviceRouter } from './routes/device.routes';
 import { adminRouter } from './routes/admin.routes';
-import { livreurRouter } from './routes/livreur.routes';
+// --- DÉSACTIVÉ : l'admin fait office de livreur unique (plus de service /livreur) ---
+// import { livreurRouter } from './routes/livreur.routes';
+// --- FIN DÉSACTIVÉ ---
 
 export function createApp() {
   const app = express();
@@ -37,15 +41,17 @@ export function createApp() {
   app.use('/addresses', addressRouter);
   app.use('/custom-requests', customRequestRouter);
   app.use('/orders', orderRouter);
+  app.use('/devices', deviceRouter);
   app.use('/notifications', notificationRouter);
   app.use('/uploads', uploadRouter);
 
   // Admin
-  app.use('/admin', adminRouter);
   app.use('/admin/custom-requests', adminCustomRequestRouter);
+  app.use('/admin', adminRouter);
 
-  // Livreur
-  app.use('/livreur', livreurRouter);
+  // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
+  // app.use('/livreur', livreurRouter);
+  // --- FIN DÉSACTIVÉ ---
 
   app.use(notFoundHandler);
   app.use(errorHandler);

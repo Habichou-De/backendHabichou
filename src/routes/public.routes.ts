@@ -3,11 +3,24 @@ import { prisma } from '../lib/prisma';
 import { ApiError, asyncHandler } from '../lib/errors';
 import { requireAuth } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { createAddressSchema, idParam, restaurantsQuery, updateAddressSchema } from '../schemas';
+import {
+  createAddressSchema,
+  idParam,
+  productsQuery,
+  restaurantsQuery,
+  updateAddressSchema,
+} from '../schemas';
 import { haversineKm, roundKm } from '../lib/geo';
+import { productCatalogInclude, withCatalogs } from '../lib/catalog';
 import { env } from '../config/env';
+import type { Prisma } from '@prisma/client';
 
 export const publicRouter = Router();
+
+/** Produit + restaurant résumé (listes des flux Repas / Épicerie / Pharmacie). */
+const productListInclude: Prisma.ProductInclude = {
+  restaurant: { select: { id: true, name: true, is_open: true, category: true } },
+};
 
 publicRouter.get(
   '/restaurants',
@@ -35,9 +48,11 @@ publicRouter.get(
     }));
 
     if (lat != null && lng != null) {
-      result = result
-        .filter((r) => r.distance_km == null || r.distance_km <= env.NEARBY_RADIUS_KM)
-        .sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
+      result = result.sort((a, b) => (a.distance_km ?? 0) - (b.distance_km ?? 0));
+      // Rayon de proximite : on le garde comme priorite, mais jamais au prix d'une liste
+      // vide (utilisateur hors zone => on renvoie tous les commerces tries par distance).
+      const nearby = result.filter((r) => r.distance_km != null && r.distance_km <= env.NEARBY_RADIUS_KM);
+      if (nearby.length > 0) result = nearby;
     }
 
     res.json(result);
@@ -63,16 +78,89 @@ publicRouter.get(
   }),
 );
 
+/* ------------- Flux Repas → "Par type de plat" (transverse aux commerces) ------------- */
+
+publicRouter.get(
+  '/dish-types',
+  asyncHandler(async (_req, res) => {
+    const grouped = await prisma.product.groupBy({
+      by: ['dish_type'],
+      where: { dish_type: { not: null }, is_available: true },
+      _count: { _all: true },
+    });
+
+    const dishTypes = grouped
+      .filter((g): g is typeof g & { dish_type: string } => Boolean(g.dish_type))
+      .map((g) => ({ dish_type: g.dish_type, count: g._count._all }))
+      .sort((a, b) => b.count - a.count || a.dish_type.localeCompare(b.dish_type, 'fr'));
+
+    res.json(dishTypes);
+  }),
+);
+
+/* --------------------- Catalogue produits (listes transverses) --------------------- */
+
+publicRouter.get(
+  '/products',
+  validate({ query: productsQuery }),
+  asyncHandler(async (req, res) => {
+    const q = req.validated?.query as {
+      dish_type?: string;
+      flow?: 'epicerie' | 'pharmacie';
+      medication_category_id?: string;
+      restaurant_id?: string;
+      q?: string;
+    };
+
+    const where: Prisma.ProductWhereInput = { is_available: true };
+    if (q.dish_type) where.dish_type = q.dish_type;
+    if (q.restaurant_id) where.restaurant_id = q.restaurant_id;
+    if (q.medication_category_id) where.medication_category_id = q.medication_category_id;
+    if (q.flow) where.restaurant = { category: q.flow };
+    if (q.q) {
+      where.OR = [
+        { name: { contains: q.q, mode: 'insensitive' } },
+        { description: { contains: q.q, mode: 'insensitive' } },
+      ];
+    }
+
+    const products = await prisma.product.findMany({
+      where,
+      include: productListInclude,
+      orderBy: [{ category: 'asc' }, { name: 'asc' }],
+      take: 300,
+    });
+    res.json(products);
+  }),
+);
+
+/* --------------------- Flux Pharmacie → catégories de médicaments --------------------- */
+
+publicRouter.get(
+  '/medication-categories',
+  asyncHandler(async (_req, res) => {
+    const categories = await prisma.medicationCategory.findMany({
+      where: { is_active: true },
+      orderBy: [{ sort_order: 'asc' }, { created_at: 'asc' }],
+      include: { _count: { select: { products: true } } },
+    });
+    res.json(categories);
+  }),
+);
+
 publicRouter.get(
   '/products/:id',
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
     const product = await prisma.product.findUnique({
       where: { id: req.params.id },
-      include: { restaurant: { select: { id: true, name: true, is_open: true } } },
+      include: {
+        restaurant: { select: { id: true, name: true, is_open: true } },
+        ...productCatalogInclude,
+      },
     });
     if (!product) throw ApiError.notFound('Produit introuvable');
-    res.json(product);
+    res.json(withCatalogs(product));
   }),
 );
 

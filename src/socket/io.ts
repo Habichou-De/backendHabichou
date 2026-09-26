@@ -53,10 +53,12 @@ export function initSocket(httpServer: HttpServer): Server {
         const order = await prisma.order.findUnique({ where: { id: orderId } });
         if (!order) return ack?.({ error: { code: 'NOT_FOUND', message: 'Commande introuvable' } });
         let allowed = role === 'admin' || order.user_id === userId;
-        if (!allowed && role === 'livreur') {
-          const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
-          allowed = Boolean(livreur && order.livreur_id === livreur.id);
-        }
+        // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
+        // if (!allowed && role === 'livreur') {
+        //   const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
+        //   allowed = Boolean(livreur && order.livreur_id === livreur.id);
+        // }
+        // --- FIN DÉSACTIVÉ ---
         if (!allowed) return ack?.({ error: { code: 'FORBIDDEN', message: 'Acces refuse' } });
         socket.join(`order:${orderId}`);
         ack?.({ ok: true });
@@ -71,14 +73,24 @@ export function initSocket(httpServer: HttpServer): Server {
 
     socket.on('livreur:location', async (payload: { lat: number; lng: number; order_id?: string }) => {
       try {
-        if (role !== 'livreur') return;
+        // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
+        // if (role !== 'livreur') return;
+        if (role !== 'admin') return;
+        // --- FIN DÉSACTIVÉ ---
         if (typeof payload?.lat !== 'number' || typeof payload?.lng !== 'number') return;
-        const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
-        if (!livreur) return;
-        await prisma.livreur.update({
-          where: { id: livreur.id },
-          data: { current_lat: payload.lat, current_lng: payload.lng },
+        // --- DÉSACTIVÉ : gestion de plusieurs livreurs (l'admin fait office de livreur unique) ---
+        // const livreur = await prisma.livreur.findUnique({ where: { user_id: userId } });
+        // if (!livreur) return;
+        // await prisma.livreur.update({
+        //   where: { id: livreur.id },
+        //   data: { current_lat: payload.lat, current_lng: payload.lng },
+        // });
+        const livreur = await prisma.livreur.upsert({
+          where: { user_id: userId },
+          update: { current_lat: payload.lat, current_lng: payload.lng },
+          create: { user_id: userId, current_lat: payload.lat, current_lng: payload.lng },
         });
+        // --- FIN DÉSACTIVÉ ---
         const eventPayload = {
           livreur_id: livreur.id,
           user_id: userId,
