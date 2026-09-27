@@ -1,9 +1,20 @@
-import { Expo, type ExpoPushMessage, type ExpoPushTicket } from 'expo-server-sdk';
+import type { ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
 import { prisma } from './prisma';
 import { logger } from './logger';
 
-/** Client Expo Push (API officielle, chunks de 100, retries integres). */
-const expo = new Expo();
+type ExpoSdk = typeof import('expo-server-sdk');
+
+// Indirection via new Function : empeche tsc (module commonjs) et esbuild/tsx
+// de reecrire import() en require(), ce qui casserait sur un package ESM-only.
+const dynImport = new Function('s', 'return import(s)') as (s: string) => Promise<ExpoSdk>;
+
+let sdkPromise: Promise<ExpoSdk> | undefined;
+
+/** Lazy-load du SDK (ESM-only) : charge une seule fois, au premier usage. */
+function getExpoSdk(): Promise<ExpoSdk> {
+  if (!sdkPromise) sdkPromise = dynImport('expo-server-sdk');
+  return sdkPromise;
+}
 
 export interface PushPayload {
   title: string;
@@ -22,6 +33,8 @@ export interface PushPayload {
  */
 export async function pushAdmins(payload: PushPayload): Promise<number> {
   try {
+    const { Expo } = await getExpoSdk();
+    const expo = new Expo();
     const admins = await prisma.user.findMany({
       where: { role: 'admin', expo_push_token: { not: null } },
       select: { id: true, expo_push_token: true },
